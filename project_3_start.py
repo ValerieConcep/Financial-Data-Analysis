@@ -1,134 +1,125 @@
-import datetime
-import pprint
 import statistics
 import urllib
 import openpyxl
 import requests
+import urllib.parse
 
-# copy in getEndpoint function for FMP
-def getEndpoint(endpoint, version, parameters):
-    baseUrl = f"https://financialmodelingprep.com/{version}"
+# function for FMP
 
-    endpointUrl = f"{baseUrl}/{endpoint}"
+API_KEY = "un9SnAnMNfh3V2e1C1MSdntTOqefUvoF"
 
-    parameters['apikey'] = "6nbL5vjOQHAxBFF293yE8OPyZsB9CAIV" # Copy your API key here
-    headers = {}
-    payload = {}
 
-    print("Getting Endpoint: " + endpointUrl + "?" + urllib.parse.urlencode(parameters))
-    response = requests.request("GET", endpointUrl, headers=headers, data=payload, params=parameters)
-    response_data = response.json()
-    return response_data
+def get_endpoint(endpoint, parameters):
+    url = f"https://financialmodelingprep.com/stable/{endpoint}"
+    params = parameters.copy()
+    params["apikey"] = API_KEY
+
+    print("Getting Endpoint:", url + "?" + urllib.parse.urlencode(params))
+    response = requests.get(url, params=params)
+    response.raise_for_status()
+    return response.json()
+
 # create workbook for companies
-stock_wb= openpyxl.Workbook()
-ws1= stock_wb.active
+stock_wb = openpyxl.Workbook()
+ws1 = stock_wb.active
+ws1.title = "Summary"  # Renaming default sheet
 
+# add worksheets
+company_ws = stock_wb.create_sheet("Company Data")
+stock_ws = stock_wb.create_sheet("Stock Data")
 
+# add headers
+company_ws.append(["Symbol", "Company Name", "Sector", "Exchange", "Volatility", "Trend Slope"])
+stock_ws.append(["Symbol", "Date", "Open", "Close"])
 
-# add worksheets for company data and stock price data
-company_ws= stock_wb.create_sheet("Company Data")
-stock_ws= stock_wb.create_sheet("Stock Data")
+# read in stocklist file
+ticker_list = []
+try:
+    with open("stocklist.txt") as file_pointer:
+        file_contents = file_pointer.read()
 
-# add headers to company/stock price worksheets
-company_ws.append([
-    "Symbol", "Company Name", "Sector", "Exchange",
-    "Volatility", "Trend Slope"
-])
+    for line_value in file_contents.splitlines():
+        # Adjust logic if your file format differs
+        if "CD" in line_value:
+            ticker_list = line_value[3:].split(",")
+            break
+except FileNotFoundError:
+    print("Error: stocklist.txt not found. Using default list.")
+    ticker_list = ["CCL", "AAPL", "MSFT"]
 
-stock_ws.append([
-    "Symbol", "Date", "Open", "Close"
-])
+print("Tickers to process:", ticker_list)
 
-# read in stocktwits file
-with open ("stocklist.txt") as file_pointer:
-    file_contents= file_pointer.read()
+# Loop through tickers
+for ticker in ticker_list:
+    ticker = ticker.strip() # This removes ' NVDA' -> 'NVDA'
+    if not ticker: continue # Skips empty strings
+    print(f"\n--- Processing: {ticker} ---")
 
-#print(len(file_contents.splitlines()))
-# split file into list of symbols
-ticker_list= []
-for line_value in  (file_contents.splitlines()):
-    user_lastname= "CD"
-    if user_lastname in line_value:
-        ticker_list= line_value[3:].split(",")
+    # 1. Download profile data
+    profile_request = get_endpoint("profile", {"symbol": ticker})
 
-        break
-
-
-print("Tickers:",ticker_list)
-
-
-"stocklist.txt"
-
-
-# loop through collection of symbols; for each symbol
-#Loop through tickers
-for ticker_index,ticker in enumerate(ticker_list):
-    print("Processing:",ticker)
-
-    # download profile data
-    profile_request = getEndpoint(
-        endpoint="profile",
-        version="stable",
-        parameters={"symbol": ticker}
-    )
-
-
-    company_profile= profile_request[0]
-
-    company_name = company_profile.get("companyName")
-    sector = company_profile.get("sector")
-    exchange = company_profile.get("exchange")
-    pprint.pprint(profile_request)
-
-    #Stock Prices
-    # download stock price data
-    price_request = getEndpoint(
-            endpoint="historical-price-full",
-            version="stable",
-            parameters={"symbol": ticker}
-    )
-
-    historical_price= price_request.get('historical-price-full')
-    # create price trend dictionary of x and y values
-    close_price= []
-    x_values=[]
-    y_values=[]
-    # loop through collection of days of stock prices; for each day
-
-    for index, day in enumerate(historical_price[:30]):
-        # extract date, open, close, etc.
-        date= day.get("date")
-        open_price = day.get("open")
-        close_price= day.get("close")
-
-
-        # create 'record' array for stock price data points and append to worksheet
-        stock_ws.append([ticker, date, open_price, close_price])
-        # append price to y values and day number to x values
-        close_price.append(close_price)
-        x_values.append(index)
-        y_values.append(close_price)
-
-        # calculate volatility
-
-    votality= statistics.stdev(close_price) if len(close_price)> 1  else 0
-
-    # calculate price trend slope
-    if len(x_values) > 1:
-        slope = (y_values[-1] - y_values[0]) / (x_values[-1] - x_values[0])
+    if isinstance(profile_request, list) and len(profile_request) > 0:
+        company_profile = profile_request[0]
+        company_name = company_profile.get("companyName", "N/A")
+        sector = company_profile.get("sector", "N/A")
+        exchange = company_profile.get("exchange", "N/A")
     else:
+        print(f"No profile data found for {ticker}")
+        continue
+
+    # 2. Download stock price data
+    price_request = get_endpoint("historical-price-eod/full", {"symbol": ticker})
+
+    if isinstance(price_request, list):
+        historical_list = price_request
+    elif isinstance(price_request, dict):
+        historical_list = price_request.get("historical", [])
+    else:
+        print(f"Skipping {ticker}: unexpected API response.")
+        continue
+
+    if not historical_list:
+        print(f"No historical price data found for {ticker}")
+        continue
+
+    # Setup for math/excel
+    close_price_list = []
+    x_values = []
+
+    # Loop through the last 30 days
+    for index, day in enumerate(historical_list[:30]):
+        date = day.get("date")
+        open_p = day.get("open")
+        close_p = day.get("close")
+
+        # Append to stock worksheet
+        stock_ws.append([ticker, date, open_p, close_p])
+
+        # Collect values for calculations
+        close_price_list.append(close_p)
+        x_values.append(index)
+
+    # 3. Calculations
+    # Volatility (Standard Deviation)
+    if len(close_price_list) > 1:
+        volatility = statistics.stdev(close_price_list)
+        # Slope: (Latest Price - Oldest Price) / (Latest Day - Oldest Day)
+        # Note: Index 0 is usually the most recent day in FMP
+        slope = (close_price_list[0] - close_price_list[-1]) / (x_values[-1] - x_values[0])
+    else:
+        volatility = 0
         slope = 0
 
-    # create a 'record' array to hold company data points
+    # 4. Append to company worksheet
     company_ws.append([
         ticker,
         company_name,
         sector,
         exchange,
-        round(votality, 2),
+        round(volatility, 2),
         round(slope, 2)
     ])
-    # append record to appropriate worksheet
 
 # save workbook
 stock_wb.save("project3.xlsx")
+print("\nSuccess! Data saved to project3.xlsx")
